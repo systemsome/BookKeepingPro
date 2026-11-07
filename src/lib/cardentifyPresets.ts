@@ -1,0 +1,937 @@
+// Cardentify (https://cards.no2.ac) & CardArt (https://cardart.cc) Unified Card Face Engine
+// Curated Apple Pay / Google Wallet PassKit lossless card face collections
+
+import { CARDENTIFY_CARDS, CardentifyCard } from './cardentifyData';
+import { getAllCardArtCards, CardArtItem, syncWithCardArtOnline, searchCardArtLive } from './cardArtSync';
+import { saveCardsToStorage, loadCardsFromStorage } from './cardStorage';
+
+export type { CardentifyCard, CardArtItem };
+export { CARDENTIFY_CARDS, syncWithCardArtOnline, searchCardArtLive };
+
+export interface CardFacePreset {
+  id: string;
+  name: string;
+  bankName: string;
+  englishName: string;
+  cardCategory: 'DEBIT' | 'CREDIT' | 'DIGITAL';
+  cardNetwork: 'UNIONPAY' | 'VISA' | 'MASTERCARD' | 'AMEX' | 'JCB' | 'NONE';
+  cardTier: string;
+  logoType: string;
+  textColorMode: 'light' | 'dark';
+  cardStyle: {
+    background: string;
+    accentColor: string;
+    borderColor: string;
+    patternType?: 'waves' | 'mesh' | 'geometric' | 'radial-sheen' | 'silk-stripes' | 'circuit' | 'dots' | 'gradient';
+  };
+  cardImageUrl?: string;
+  description: string;
+}
+
+// Unified card item format spanning Cardentify (cards.no2.ac) and CardArt (cardart.cc)
+export interface UnifiedCardItem {
+  id: string;
+  name: string;
+  titleEn?: string | null;
+  issuerName: string;
+  issuerEnglish: string;
+  imageUrl: string;
+  brand: string;
+  type: string;
+  country: string;
+  cardTier?: string;
+  source: 'cardentify' | 'cardart';
+  sourceUrl: string;
+  bins?: string[];
+  tags?: string[];
+}
+
+// Convert Cardentify to Unified
+export function cardentifyToUnified(c: CardentifyCard): UnifiedCardItem {
+  const cardTier = c.name.includes('白金')
+    ? '白金卡'
+    : c.name.includes('黑') || c.name.includes('百夫长')
+    ? '黑金卡'
+    : c.name.includes('金卡') || c.name.includes('金葵花')
+    ? '金卡'
+    : '标准卡';
+
+  return {
+    id: `cardentify-${c.id}`,
+    name: c.name,
+    titleEn: c.issuerEnglish,
+    issuerName: c.issuerName || '银行机构',
+    issuerEnglish: c.issuerEnglish || 'BANK CARD',
+    imageUrl: c.imageUrl,
+    brand: c.brand || 'UnionPay',
+    type: c.type || 'Debit',
+    country: c.country || 'CN',
+    cardTier,
+    source: 'cardentify',
+    sourceUrl: 'https://cards.no2.ac/',
+    bins: c.bins,
+    tags: [c.issuerName, c.name, c.brand, c.type, cardTier].filter(Boolean) as string[],
+  };
+}
+
+// Convert CardArt to Unified
+export function cardArtToUnified(c: CardArtItem): UnifiedCardItem {
+  const cardTier = c.title.includes('白金')
+    ? '白金卡'
+    : c.title.includes('黑') || c.title.includes('百夫长')
+    ? '黑金卡'
+    : c.title.includes('金卡')
+    ? '金卡'
+    : '标准卡';
+
+  return {
+    id: `cardart-${c.id}`,
+    name: c.title,
+    titleEn: c.titleEn,
+    issuerName: c.issuerName || 'CardArt 创意卡面',
+    issuerEnglish: c.issuerEnglish || 'CardArt Community',
+    imageUrl: c.imageUrl,
+    brand: c.brand || 'UnionPay',
+    type: c.type || 'Credit',
+    country: c.country || 'CN',
+    cardTier,
+    source: 'cardart',
+    sourceUrl: c.sourceUrl || `https://cardart.cc/c/${c.id}`,
+    tags: c.tags,
+  };
+}
+
+const CARDENTIFY_CACHE_KEY = 'cardentify_synced_cards_v2';
+let inMemoryCardentifyCards: CardentifyCard[] | null = null;
+
+// Get all Cardentify cards (Base 557 + dynamically synced from cards.no2.ac)
+export function getAllCardentifyCards(): CardentifyCard[] {
+  if (inMemoryCardentifyCards && inMemoryCardentifyCards.length > 0) {
+    return inMemoryCardentifyCards;
+  }
+
+  const map = new Map<number, CardentifyCard>();
+  CARDENTIFY_CARDS.forEach((c) => map.set(c.id, c));
+
+  try {
+    const raw = localStorage.getItem(CARDENTIFY_CACHE_KEY);
+    const cached: CardentifyCard[] = raw ? JSON.parse(raw) : [];
+    cached.forEach((c) => map.set(c.id, c));
+  } catch {}
+
+  const list = Array.from(map.values());
+  inMemoryCardentifyCards = list;
+
+  // Restore full cards from IndexedDB asynchronously
+  if (typeof window !== 'undefined') {
+    loadCardsFromStorage().then((res) => {
+      if (res?.cardentifyCards && res.cardentifyCards.length > list.length) {
+        cacheCardentifyCards(res.cardentifyCards);
+      }
+    }).catch(() => {});
+  }
+
+  return list;
+}
+
+// Cache newly discovered or synced Cardentify cards
+export function cacheCardentifyCards(newCards: CardentifyCard[]): number {
+  if (!newCards || newCards.length === 0) return 0;
+  try {
+    const current = inMemoryCardentifyCards || getAllCardentifyCards();
+    const map = new Map<number, CardentifyCard>();
+    current.forEach((c) => map.set(c.id, c));
+
+    let addedCount = 0;
+    newCards.forEach((c) => {
+      if (!map.has(c.id)) {
+        addedCount++;
+      }
+      map.set(c.id, c);
+    });
+
+    const merged = Array.from(map.values());
+    inMemoryCardentifyCards = merged;
+
+    saveCardsToStorage(undefined, merged).catch(() => {});
+
+    try {
+      localStorage.setItem(CARDENTIFY_CACHE_KEY, JSON.stringify(merged));
+    } catch {}
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('cardentify-updated', { detail: { count: merged.length } })
+      );
+      window.dispatchEvent(
+        new CustomEvent('gallery-updated', {
+          detail: {
+            total: merged.length + getAllCardArtCards().length,
+            cardentifyCount: merged.length,
+            cardArtCount: getAllCardArtCards().length,
+          },
+        })
+      );
+    }
+
+    return addedCount;
+  } catch {
+    return 0;
+  }
+}
+
+// Get all unified cards from both sources (live dual-library fused)
+export function getAllUnifiedCards(): UnifiedCardItem[] {
+  const cardentifyList = getAllCardentifyCards().map(cardentifyToUnified);
+  const cardArtList = getAllCardArtCards().map(cardArtToUnified);
+  return [...cardentifyList, ...cardArtList];
+}
+
+// Get dynamic total card count across both databases (Cardentify + CardArt synced)
+export function getTotalGalleryCardsCount(): number {
+  const local = getAllCardentifyCards().length + getAllCardArtCards().length;
+  return Math.max(8338, local);
+}
+
+// Convert Cardentify card to CardFacePreset format for backwards compatibility
+export function cardentifyToPreset(c: CardentifyCard | UnifiedCardItem): CardFacePreset {
+  const isCredit = c.type?.toLowerCase() === 'credit';
+  let network: 'UNIONPAY' | 'VISA' | 'MASTERCARD' | 'AMEX' | 'JCB' | 'NONE' = 'UNIONPAY';
+  const brandUp = (c.brand || '').toUpperCase();
+  if (brandUp.includes('VISA')) network = 'VISA';
+  else if (brandUp.includes('MASTER')) network = 'MASTERCARD';
+  else if (brandUp.includes('AMEX') || brandUp.includes('AMERICAN EXPRESS')) network = 'AMEX';
+  else if (brandUp.includes('JCB')) network = 'JCB';
+  else if (brandUp.includes('UNIONPAY')) network = 'UNIONPAY';
+
+  const sourceName = 'source' in c && c.source === 'cardart' ? 'CardArt (cardart.cc)' : 'Cardentify (cards.no2.ac)';
+
+  return {
+    id: typeof c.id === 'string' && c.id.startsWith('card') ? c.id : `cardentify-${c.id}`,
+    name: c.name,
+    bankName: c.issuerName || '银行机构',
+    englishName: c.issuerEnglish || 'BANK CARD',
+    cardCategory: isCredit ? 'CREDIT' : 'DEBIT',
+    cardNetwork: network,
+    cardTier: c.name.includes('白金') ? '白金卡' : c.name.includes('金卡') ? '金卡' : '贵宾卡',
+    logoType: 'generic',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+      accentColor: '#38bdf8',
+      borderColor: 'border-white/20',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: c.imageUrl,
+    description: `官方原版 Apple Pay 卡面 (${sourceName} · ${c.issuerName} · ${c.brand})`,
+  };
+}
+
+// Pre-packaged curated presets with authentic lossless images
+export const CARDENTIFY_PRESETS: CardFacePreset[] = [
+  // 招商银行
+  {
+    id: 'cmb-classic-sunflower',
+    name: '招商银行财富绽放金葵花卡',
+    bankName: '招商银行',
+    englishName: 'CHINA MERCHANTS BANK',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '金葵花贵宾卡',
+    logoType: 'cmb',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #b91c1c 0%, #991b1b 35%, #7f1d1d 70%, #450a0a 100%)',
+      accentColor: '#fde047',
+      borderColor: 'border-amber-400/40',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/4c558a80095fe02b3de352e48b6d6ded3dfbffb3f90fc59eff33694ce88129d9.png',
+    description: 'Apple Pay 招行官方财富绽放金葵花高清卡面',
+  },
+  {
+    id: 'cmb-young-black',
+    name: '招行Young卡(青年版)炫酷黑',
+    bankName: '招商银行',
+    englishName: 'CHINA MERCHANTS BANK',
+    cardCategory: 'CREDIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: 'Young卡炫酷黑',
+    logoType: 'cmb',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #18181b 0%, #09090b 55%, #000000 100%)',
+      accentColor: '#e2e8f0',
+      borderColor: 'border-slate-500/50',
+      patternType: 'geometric',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/804b676762dbac00aefcfe8ebd93d8fa0e9a1bae7fb9fa1bcd9eaa32a669574c.png',
+    description: 'Apple Pay 招行 Young 黑色青年信用卡官方卡面',
+  },
+  {
+    id: 'cardart-cmb-master-black',
+    name: '招商银行黑色银标万事达 (CardArt)',
+    bankName: '招商银行',
+    englishName: 'CHINA MERCHANTS BANK',
+    cardCategory: 'CREDIT',
+    cardNetwork: 'MASTERCARD',
+    cardTier: '万事达黑卡',
+    logoType: 'cmb',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #18181b 0%, #09090b 60%, #000000 100%)',
+      accentColor: '#e2e8f0',
+      borderColor: 'border-slate-400/40',
+      patternType: 'geometric',
+    },
+    cardImageUrl: 'https://cardart.cc/img/cards/9ovQ6FvRK0/v1/w1024.webp',
+    description: 'CardArt (cardart.cc) 招行黑色银标万事达尊享卡面',
+  },
+  {
+    id: 'cmb-freedom-platinum',
+    name: '招商银行自由人生白金信用卡',
+    bankName: '招商银行',
+    englishName: 'CHINA MERCHANTS BANK',
+    cardCategory: 'CREDIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '自由人生白金卡',
+    logoType: 'cmb',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #020617 100%)',
+      accentColor: '#e2e8f0',
+      borderColor: 'border-slate-500/50',
+      patternType: 'geometric',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/a0c1384018f6ebea167ca5f4c0c623099d7092314b8a64507815c8be27c8219b.png',
+    description: 'Apple Pay 招行自由人生白金卡官方高定卡面',
+  },
+
+  // 工商银行
+  {
+    id: 'cardart-icbc-caishen',
+    name: '工商银行工银聚财财神卡 (CardArt)',
+    bankName: '中国工商银行',
+    englishName: 'INDUSTRIAL & COMMERCIAL BANK OF CHINA',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '聚财财神卡尊享版',
+    logoType: 'icbc',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #b91c1c 0%, #7f1d1d 60%, #450a0a 100%)',
+      accentColor: '#fde047',
+      borderColor: 'border-amber-400/50',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: 'https://cardart.cc/img/cards/HwcVIYdN84/v1/w1024.webp',
+    description: 'CardArt (cardart.cc) 工商银行工银聚财财神卡尊享版',
+  },
+  {
+    id: 'icbc-lingtong',
+    name: '中国工商银行工银灵通卡',
+    bankName: '中国工商银行',
+    englishName: 'INDUSTRIAL & COMMERCIAL BANK OF CHINA',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '灵通借记账户',
+    logoType: 'icbc',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 45%, #7f1d1d 85%, #3f0708 100%)',
+      accentColor: '#fef08a',
+      borderColor: 'border-rose-400/40',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/0b7f393e833fe583d1a6a41dfe8e9ddac80470b2c2942a4e17477653cfa9c17e.png',
+    description: 'Apple Pay 工商银行工银灵通卡官方卡面',
+  },
+  {
+    id: 'icbc-constellation',
+    name: '中国工商银行宇宙星座卡',
+    bankName: '中国工商银行',
+    englishName: 'INDUSTRIAL & COMMERCIAL BANK OF CHINA',
+    cardCategory: 'CREDIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '宇宙星座白金卡',
+    logoType: 'icbc',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #18181b 0%, #09090b 55%, #000000 100%)',
+      accentColor: '#fbbf24',
+      borderColor: 'border-amber-400/50',
+      patternType: 'dots',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/61a36ec6f71b9855124adf63408ca1627e269fd70cd34b74cf418d2f8be260d8.png',
+    description: 'Apple Pay 工银宇宙星座卡黑金官方卡面',
+  },
+
+  // 建设银行
+  {
+    id: 'ccb-dragon-joy',
+    name: '中国建设银行龙卡JOY信用卡',
+    bankName: '中国建设银行',
+    englishName: 'CHINA CONSTRUCTION BANK',
+    cardCategory: 'CREDIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '龙卡JOY信用卡',
+    logoType: 'ccb',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #1e3a8a 0%, #1e40af 40%, #1d4ed8 75%, #0284c7 100%)',
+      accentColor: '#67e8f9',
+      borderColor: 'border-blue-400/40',
+      patternType: 'geometric',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/e109a083ddc610334cb50fdbc351acc21fec3aeddb269f6a8c820df5476a4260.png',
+    description: 'Apple Pay 建行龙卡JOY信用卡官方原版',
+  },
+
+  // 中国银行
+  {
+    id: 'boc-bilibili',
+    name: '中国银行上海哔哩哔哩联名借记卡',
+    bankName: '中国银行',
+    englishName: 'BANK OF CHINA',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: 'Bilibili 联名借记卡',
+    logoType: 'boc',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #991b1b 0%, #7f1d1d 50%, #450a0a 100%)',
+      accentColor: '#fca5a5',
+      borderColor: 'border-red-400/40',
+      patternType: 'waves',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/4d4392c526c76da42d7778862cc0bf7d532d5041dcae53a379aab87e3b8903e8.png',
+    description: 'Apple Pay 中行B站联名借记卡官方高清卡面',
+  },
+
+  // 交通银行
+  {
+    id: 'bcm-pacific-debit',
+    name: '交通银行太平洋借记卡',
+    bankName: '交通银行',
+    englishName: 'BANK OF COMMUNICATIONS',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'UNIONPAY',
+    cardTier: '太平洋借记卡',
+    logoType: 'bcm',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #0e7490 0%, #155e75 45%, #164e63 100%)',
+      accentColor: '#67e8f9',
+      borderColor: 'border-cyan-400/40',
+      patternType: 'waves',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/deedfc683cc3e355b31ff50729c77106081ff631c65033455b16461f169dfa53.png',
+    description: 'Apple Pay 交行太平洋借记卡官方卡面',
+  },
+
+  // 中信银行
+  {
+    id: 'citic-mastercard-world',
+    name: '中信银行万事达双币世界卡',
+    bankName: '中信银行',
+    englishName: 'CHINA CITIC BANK',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'MASTERCARD',
+    cardTier: '万事达世界借记卡',
+    logoType: 'citic',
+    textColorMode: 'light',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #18181b 0%, #09090b 60%, #000000 100%)',
+      accentColor: '#fbbf24',
+      borderColor: 'border-amber-400/50',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/cbf7809f99d0fae00c6f7edb2616ade819b062d8d1d839d7cac20b5dd74a2d6c.png',
+    description: 'Apple Pay 中信万事达双币借记卡世界卡',
+  },
+
+  // 国际与交通卡 (CardArt 八达通 & Suica)
+  {
+    id: 'cardart-hk-octopus',
+    name: '香港汇丰八达通 (CardArt)',
+    bankName: '香港八达通 / 汇丰',
+    englishName: 'Hong Kong Octopus',
+    cardCategory: 'DIGITAL',
+    cardNetwork: 'NONE',
+    cardTier: '数字钱包公交卡',
+    logoType: 'generic',
+    textColorMode: 'dark',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
+      accentColor: '#f97316',
+      borderColor: 'border-orange-300/50',
+      patternType: 'waves',
+    },
+    cardImageUrl: 'https://cardart.cc/img/cards/g40OknIhxZ/v1/w1024.webp',
+    description: 'CardArt (cardart.cc) 香港汇丰八达通定制数字钱包卡面',
+  },
+  {
+    id: 'wise-card-green',
+    name: 'Wise 多币种借记卡',
+    bankName: 'Wise',
+    englishName: 'WISE MULTI-CURRENCY',
+    cardCategory: 'DEBIT',
+    cardNetwork: 'VISA',
+    cardTier: 'Wise Multi-Currency Card',
+    logoType: 'generic',
+    textColorMode: 'dark',
+    cardStyle: {
+      background: 'linear-gradient(135deg, #a3e635 0%, #84cc16 50%, #4d7c0f 100%)',
+      accentColor: '#1a2e05',
+      borderColor: 'border-lime-500/40',
+      patternType: 'radial-sheen',
+    },
+    cardImageUrl: 'https://r2-cardentify.cdn.no2.ac/a8181a386b935e4c0721abf0119861682a1e8103b3a79b2cc7b1c903ab62a9ff.png',
+    description: 'Apple Pay Wise 荧光绿官方借记卡卡面',
+  },
+];
+
+// Lookup by preset ID
+export function getCardentifyPreset(presetId: string): CardFacePreset | undefined {
+  const p = CARDENTIFY_PRESETS.find((item) => item.id === presetId);
+  if (p) return p;
+  if (presetId.startsWith('cardentify-')) {
+    const rawId = parseInt(presetId.replace('cardentify-', ''), 10);
+    const card = CARDENTIFY_CARDS.find((c) => c.id === rawId);
+    if (card) return cardentifyToPreset(card);
+  }
+  if (presetId.startsWith('cardart-')) {
+    const rawId = presetId.replace('cardart-', '');
+    const card = getAllCardArtCards().find((c) => c.id === rawId);
+    if (card) return cardentifyToPreset(cardArtToUnified(card));
+  }
+  return undefined;
+}
+
+// Find card in full database by ID
+export function getCardentifyCardById(id: number | string): CardentifyCard | undefined {
+  const numId = typeof id === 'number' ? id : parseInt(id.replace('cardentify-', ''), 10);
+  return CARDENTIFY_CARDS.find((c) => c.id === numId);
+}
+
+// Find card in full database by direct Image URL
+export function findCardentifyCardByUrl(url: string): UnifiedCardItem | undefined {
+  if (!url) return undefined;
+  const unified = getAllUnifiedCards();
+  return unified.find((c) => c.imageUrl === url);
+}
+
+// Smart Best Matcher across BOTH Cardentify and CardArt with cardTier intelligence
+export function matchBestCardentifyCard(
+  name: string,
+  bankName?: string,
+  category?: string,
+  cardTier?: string,
+  cardNetwork?: 'UNIONPAY' | 'VISA' | 'MASTERCARD' | 'AMEX' | 'JCB' | 'NONE' | string
+): UnifiedCardItem | undefined {
+  const isCredit = category === 'CREDIT_CARD';
+  const query = `${bankName || ''} ${name || ''} ${cardTier || ''} ${cardNetwork || ''}`.toLowerCase();
+  const allCards = getAllUnifiedCards();
+
+  // 1. Strict check for pure non-card categories / digital wallets
+  if (
+    category === 'ALIPAY' || category === 'WECHAT' || category === 'YUEBAO' ||
+    category === 'HUABEI' || category === 'JD_FINANCE' || category === 'JD_BAITIAO' ||
+    category === 'CASH' || category === 'GOLD' || category === 'FUND' ||
+    category === 'RECEIVABLE' || category === 'PAYABLE'
+  ) {
+    return undefined;
+  }
+
+  // 2. Strict check for non-card institution keywords
+  const nonCardKeywords = [
+    '支付宝', '微信支付', '微信零钱', '零钱通', '余额宝', '花呗', '京东白条',
+    '随身现金', '现金钱包', '备用金', '黄金积存', '积存金', '公募基金',
+    '借出待收', '借入待还', '网商银行', 'mybank', '百信银行', 'aibank'
+  ];
+  if (nonCardKeywords.some((k) => query.includes(k) && !query.includes('信用卡') && !query.includes('卡面'))) {
+    return undefined;
+  }
+
+  // 3. Precise target bank resolution
+  let targetBank: string | undefined = undefined;
+  if (query.includes('招商') || query.includes('招行') || query.includes('cmb')) targetBank = 'CMB';
+  else if (query.includes('工商') || query.includes('工行') || query.includes('icbc') || query.includes('工银')) targetBank = 'ICBC';
+  else if (query.includes('建设') || query.includes('建行') || query.includes('ccb') || query.includes('龙卡')) targetBank = 'CCB';
+  else if (query.includes('农业') || query.includes('农行') || query.includes('abc') || query.includes('金穗')) targetBank = 'ABC';
+  else if (query.includes('中国银行') || query.includes('中行') || query.includes('boc') || query.includes('中银')) targetBank = 'BOC';
+  else if (query.includes('交通') || query.includes('交行') || query.includes('bcm') || query.includes('bocom') || query.includes('太平洋')) targetBank = 'BOCOM';
+  else if (query.includes('中信') || query.includes('citic')) targetBank = 'CITIC';
+  else if (query.includes('浦发') || query.includes('浦东发展') || query.includes('spdb')) targetBank = 'SPDB';
+  else if (query.includes('民生') || query.includes('cmbc')) targetBank = 'CMBC';
+  else if (query.includes('平安') || query.includes('pab') || query.includes('pingan')) targetBank = 'PINGAN';
+  else if (query.includes('广发') || query.includes('cgb') || query.includes('gdb')) targetBank = 'CGB';
+  else if (query.includes('兴业') || query.includes('cib')) targetBank = 'CIB';
+  else if (query.includes('邮政') || query.includes('邮储') || query.includes('psbc')) targetBank = 'PSBC';
+  else if (query.includes('光大') || query.includes('everbright') || query.includes('ceb')) targetBank = 'CEB';
+  else if (query.includes('宁波') || query.includes('nbcb')) targetBank = 'NBCB';
+  else if (query.includes('北京银行') || query.includes('bob')) targetBank = 'BOB';
+  else if (query.includes('上海银行') || query.includes('bosc') || query.includes('bos')) targetBank = 'BOS';
+  else if (query.includes('华夏') || query.includes('hxb')) targetBank = 'HXB';
+  else if (query.includes('浙商') || query.includes('czbank')) targetBank = 'CZBANK';
+  else if (query.includes('微众') || query.includes('webank')) targetBank = 'WEBANK';
+  else if (query.includes('汇丰') || query.includes('hsbc') || query.includes('滙豐')) targetBank = 'HSBC';
+  else if (query.includes('渣打') || query.includes('standard chartered') || query.includes('scb')) targetBank = 'SCB';
+  else if (query.includes('花旗') || query.includes('citibank') || query.includes('citi')) targetBank = 'CITI';
+  else if (query.includes('八达通') || query.includes('octopus')) targetBank = 'OCTOPUS';
+  else if (query.includes('suica') || query.includes('西瓜卡')) targetBank = 'SUICA';
+  else if (query.includes('wise')) targetBank = 'WISE';
+  else if (query.includes('apple') || query.includes('苹果')) targetBank = 'APPLE';
+  else if (query.includes('chase') || query.includes('摩根')) targetBank = 'CHASE';
+  else if (query.includes('amex') || query.includes('运通') || query.includes('american express')) targetBank = 'AMEX';
+
+  let matches: UnifiedCardItem[] = [];
+
+  if (targetBank) {
+    matches = allCards.filter((c) => {
+      const bName = (c.issuerName || '').toLowerCase();
+      const bEng = (c.issuerEnglish || '').toLowerCase();
+      const cName = (c.name || '').toLowerCase();
+
+      switch (targetBank) {
+        case 'CMB':
+          return bName.includes('招商') || cName.includes('招商') || bEng.includes('merchants');
+        case 'ICBC':
+          return bName.includes('工商') || cName.includes('工行') || cName.includes('工银') || bEng.includes('icbc') || bEng.includes('industrial & commercial');
+        case 'CCB':
+          return bName.includes('建设') || cName.includes('建行') || cName.includes('龙卡') || bEng.includes('construction') || bEng.includes('ccb');
+        case 'ABC':
+          return bName.includes('农业') || cName.includes('农行') || cName.includes('金穗') || bEng.includes('agricultural') || bEng.includes('abc');
+        case 'BOC':
+          const isOtherBoc = bName.includes('农业') || bName.includes('工商') || bName.includes('建设') || bName.includes('邮政') || bName.includes('交通') || bEng.includes('agricultural') || bEng.includes('commercial');
+          return !isOtherBoc && (bName.includes('中国银行') || cName.includes('中国银行') || cName.includes('中银') || cName.includes('长城') || bEng === 'bank of china' || bEng.startsWith('bank of china'));
+        case 'BOCOM':
+          return bName.includes('交通') || cName.includes('交通') || cName.includes('太平洋') || bEng.includes('communications');
+        case 'CITIC':
+          return bName.includes('中信') || cName.includes('中信') || bEng.includes('citic');
+        case 'SPDB':
+          return bName.includes('浦发') || bName.includes('浦东发展') || cName.includes('浦发') || bEng.includes('pudong') || bEng.includes('spdb');
+        case 'CMBC':
+          return bName.includes('民生') || cName.includes('民生') || bEng.includes('minsheng') || bEng.includes('cmbc');
+        case 'PINGAN':
+          return bName.includes('平安') || cName.includes('平安') || bEng.includes('ping an') || bEng.includes('pingan');
+        case 'CGB':
+          return bName.includes('广发') || cName.includes('广发') || bEng.includes('guangfa') || bEng.includes('cgb') || bEng.includes('gdb');
+        case 'CIB':
+          return (bName.includes('兴业') || cName.includes('兴业') || (bEng.includes('industrial bank') && !bEng.includes('commercial'))) && !bName.includes('工商');
+        case 'PSBC':
+          return bName.includes('邮政') || bName.includes('邮储') || cName.includes('邮储') || bEng.includes('postal');
+        case 'CEB':
+          return bName.includes('光大') || cName.includes('光大') || bEng.includes('everbright') || bEng === 'ceb';
+        case 'NBCB':
+          return bName.includes('宁波') || cName.includes('宁波') || bEng.includes('ningbo') || bEng.includes('nbcb');
+        case 'BOB':
+          return bName.includes('北京银行') || (bName.includes('北京') && !bName.includes('航空') && !bName.includes('大学') && !bName.includes('通'));
+        case 'BOS':
+          return bName.includes('上海银行') || bEng.includes('bank of shanghai') || cName.includes('上海银行');
+        case 'HXB':
+          return bName.includes('华夏') || cName.includes('华夏') || bEng.includes('huaxia') || bEng.includes('hxb');
+        case 'CZBANK':
+          return bName.includes('浙商') || cName.includes('浙商') || bEng.includes('zheshang') || bEng.includes('czbank');
+        case 'WEBANK':
+          return bName.includes('微众') || cName.includes('微众') || bEng.includes('webank');
+        case 'HSBC':
+          return bName.includes('汇丰') || bName.includes('滙豐') || bEng.includes('hsbc');
+        case 'SCB':
+          return bName.includes('渣打') || bEng.includes('standard chartered') || bEng.includes('scb');
+        case 'CITI':
+          return bName.includes('花旗') || bEng.includes('citibank') || bEng.includes('citi');
+        case 'OCTOPUS':
+          return cName.includes('八达通') || cName.includes('octopus') || bName.includes('八达通');
+        case 'SUICA':
+          return cName.includes('suica') || cName.includes('西瓜卡') || bName.includes('suica');
+        case 'WISE':
+          return bName.includes('wise') || cName.includes('wise');
+        case 'APPLE':
+          return bName.includes('apple') || cName.includes('apple');
+        case 'CHASE':
+          return bName.includes('chase') || cName.includes('chase');
+        case 'AMEX':
+          return bName.includes('american express') || cName.includes('amex') || cName.includes('运通');
+        default:
+          return false;
+      }
+    });
+  } else {
+    // Non-preset safe word matching without broad noise words
+    const cleanWords = query
+      .split(/[\s·\-_()（）/]+/)
+      .filter(
+        (w) =>
+          w.length >= 2 &&
+          ![
+            '借记卡', '信用卡', '储蓄卡', '普卡', '金卡', '白金卡', '黑金卡',
+            '账户', '银行', '中国', '商业', 'unionpay', 'visa', 'mastercard', 'amex', 'jcb'
+          ].includes(w)
+      );
+    if (cleanWords.length === 0) return undefined;
+    matches = allCards.filter((c) => {
+      const allText = `${c.name} ${c.issuerName} ${c.issuerEnglish}`.toLowerCase();
+      return cleanWords.some((w) => allText.includes(w));
+    });
+  }
+
+  if (matches.length === 0) return undefined;
+
+  // Filter by category type if specified
+  const targetType = isCredit ? 'Credit' : 'Debit';
+  const sameTypeCards = matches.filter((c) => c.type.toLowerCase() === targetType.toLowerCase());
+  if (sameTypeCards.length > 0) {
+    matches = sameTypeCards;
+  }
+
+  // Scoring by specific product keywords and explicit card tier
+  let best = matches[0];
+  let maxScore = -999;
+  const keywords = [
+    '金葵花', '一卡通', 'young', '经典', '白金', '世界', 'world', '财神', '黑色',
+    '灵通', '牡丹', '星座', '环球', '飞龙',
+    '龙卡', 'joy', '全球支付',
+    '哔哩哔哩', 'bilibili', '无界', '长城', '星空',
+    '太平洋', '得利',
+    '万豪', '旅享家', '麦当劳',
+    '山水', '悠然', '白鹭',
+    '财富', '梵高', '市民', '普卡', '八达通', 'suica'
+  ];
+
+  const targetTier = (cardTier || '').toLowerCase();
+
+  for (const c of matches) {
+    let score = 0;
+    const cName = c.name.toLowerCase();
+    const cTier = (c.cardTier || '').toLowerCase();
+    const cTags = (c.tags || []).join(' ').toLowerCase();
+
+    // 1. General query keyword match
+    for (const kw of keywords) {
+      if (query.includes(kw) && cName.includes(kw)) {
+        score += 15;
+      }
+    }
+
+    // 1.1 Priority for canonical official flagship cards
+    if (cName.includes('金葵花') && !cName.includes('kitty')) score += 55;
+    if (cName.includes('财富绽放')) score += 35;
+    if (cName.includes('自由人生白金')) score += 45;
+    if (cName.includes('灵通') || cName.includes('工银灵通卡')) score += 55;
+    if (cName.includes('理财金账户') || cName.includes('理财金卡')) score += 50;
+    if (cName.includes('长城借记卡') || cName.includes('长城卡') || cName.includes('长城')) score += 50;
+    if (cName.includes('龙卡') || cName.includes('银联储蓄卡')) score += 50;
+    if (cName.includes('金穗')) score += 50;
+    if (cName.includes('沃德')) score += 50;
+    if (cName.includes('标准白金')) score += 45;
+    if (cName.includes('绿卡通')) score += 50;
+    if (cName.includes('汇通卡')) score += 50;
+    if (cName.includes('京津冀借记卡') || cName.includes('京卡')) score += 50;
+    if (cName.includes('华夏卡')) score += 50;
+    if (cName.includes('商卡')) score += 50;
+    if (cName.includes('微众卡')) score += 50;
+    if (cName.includes('寰宇人生')) score += 50;
+    if (cName.includes('幸福财富') || cName.includes('幸福年华')) score += 45;
+
+    // 1.2 Penalty for anime / collab toys unless explicitly queried
+    if (
+      cName.includes('kitty') || cName.includes('咒术回战') || cName.includes('星穹铁道') ||
+      cName.includes('初音') || cName.includes('皮卡丘') || cName.includes('海绵宝宝') ||
+      cName.includes('美少女战士') || cName.includes('chiikawa') || cName.includes('吉伊卡哇') ||
+      cName.includes('崩3') || cName.includes('蜡笔小新')
+    ) {
+      if (!query.includes('kitty') && !query.includes('咒术') && !query.includes('星穹') && !query.includes('动漫')) {
+        score -= 90;
+      }
+    }
+
+    // 1.5. Card Network Brand matching
+    if (cardNetwork && cardNetwork !== 'NONE') {
+      const netKey = String(cardNetwork).toLowerCase();
+      const bBrand = (c.brand || '').toLowerCase();
+      const bTags = (c.tags || []).join(' ').toLowerCase();
+
+      if (netKey === 'visa') {
+        if (bBrand.includes('visa') || cName.includes('visa') || bTags.includes('visa') || cName.includes('维萨')) {
+          score += 75;
+        } else if (bBrand.includes('unionpay') || bBrand.includes('银联')) {
+          score -= 30;
+        }
+      } else if (netKey === 'mastercard') {
+        if (bBrand.includes('master') || cName.includes('master') || bTags.includes('master') || cName.includes('万事达')) {
+          score += 75;
+        } else if (bBrand.includes('unionpay') || bBrand.includes('银联')) {
+          score -= 30;
+        }
+      } else if (netKey === 'amex') {
+        if (bBrand.includes('amex') || bBrand.includes('american') || cName.includes('运通') || bTags.includes('amex') || cName.includes('百夫长')) {
+          score += 75;
+        } else if (bBrand.includes('unionpay') || bBrand.includes('银联')) {
+          score -= 30;
+        }
+      } else if (netKey === 'jcb') {
+        if (bBrand.includes('jcb') || cName.includes('jcb') || bTags.includes('jcb')) {
+          score += 75;
+        } else if (bBrand.includes('unionpay') || bBrand.includes('银联')) {
+          score -= 30;
+        }
+      } else if (netKey === 'unionpay') {
+        if (bBrand.includes('unionpay') || bBrand.includes('银联') || cName.includes('银联') || bTags.includes('银联')) {
+          score += 40;
+        }
+      }
+    }
+
+    // 2. High-precision Card Tier matching
+    if (targetTier) {
+      // Signature (御玺卡)
+      if (targetTier.includes('御玺') || targetTier.includes('signature')) {
+        if (cName.includes('御玺') || cTier.includes('御玺') || cTags.includes('signature')) {
+          score += 60;
+        }
+      }
+      // World / World Elite (世界卡 / 世界之极)
+      else if (targetTier.includes('世界之极') || targetTier.includes('world elite')) {
+        if (cName.includes('世界之极') || cTier.includes('世界之极') || cTags.includes('world elite')) {
+          score += 65;
+        } else if (cName.includes('世界') || cTier.includes('世界')) {
+          score += 35;
+        }
+      }
+      else if (targetTier.includes('世界') || targetTier.includes('world')) {
+        if (cName.includes('世界') || cTier.includes('世界') || cTags.includes('world')) {
+          score += 55;
+        }
+      }
+      // Infinite (无限卡)
+      else if (targetTier.includes('无限') || targetTier.includes('infinite')) {
+        if (cName.includes('无限') || cTier.includes('无限') || cTags.includes('infinite')) {
+          score += 65;
+        }
+      }
+      // Titanium (钛金卡)
+      else if (targetTier.includes('钛金') || targetTier.includes('titanium')) {
+        if (cName.includes('钛金') || cTier.includes('钛金') || cTags.includes('titanium')) {
+          score += 60;
+        }
+      }
+      // Centurion Green (绿卡)
+      else if (targetTier.includes('绿卡') || targetTier.includes('green')) {
+        if (cName.includes('绿卡') || cName.includes('绿色') || cTags.includes('green') || cName.includes('运通绿')) {
+          score += 55;
+        }
+      }
+      // Platinum (白金 / 百夫长白金)
+      else if (targetTier.includes('白金') || targetTier.includes('platinum')) {
+        if (cName.includes('白金') || cTier.includes('白金') || cTags.includes('platinum')) {
+          score += 45;
+        } else if (cName.includes('金卡') && !cName.includes('白金')) {
+          score -= 20; // Ordinary gold card is not platinum
+        }
+      }
+      // Black / Centurion (黑金 / 黑卡 / 百夫长黑金)
+      else if (
+        targetTier.includes('黑金') ||
+        targetTier.includes('百夫长') ||
+        targetTier.includes('黑卡') ||
+        targetTier.includes('centurion')
+      ) {
+        if (cName.includes('黑金') || cName.includes('百夫长') || cName.includes('黑卡') || cName.includes('black') || cTier.includes('黑')) {
+          score += 55;
+        }
+      }
+      // Diamond (钻石)
+      else if (targetTier.includes('钻石') || targetTier.includes('diamond')) {
+        if (cName.includes('钻石') || cTier.includes('钻石') || cTags.includes('diamond')) {
+          score += 55;
+        }
+      }
+      // Private Banking / VIP (私行卡 / 金葵花 / 理财金 / 沃德 / 财富)
+      else if (
+        targetTier.includes('私行') ||
+        targetTier.includes('私人银行') ||
+        targetTier.includes('金葵花') ||
+        targetTier.includes('理财金') ||
+        targetTier.includes('沃德') ||
+        targetTier.includes('财富') ||
+        targetTier.includes('贵宾')
+      ) {
+        if (
+          cName.includes('私行') ||
+          cName.includes('私人银行') ||
+          cName.includes('金葵花') ||
+          cName.includes('理财金') ||
+          cName.includes('沃德') ||
+          cName.includes('财富') ||
+          cName.includes('贵宾')
+        ) {
+          score += 55;
+        }
+      }
+      // Gold (金卡，不含白金)
+      else if (targetTier.includes('金卡') || targetTier.includes('gold')) {
+        if ((cName.includes('金卡') || cTier.includes('金卡') || cTags.includes('gold') || cName.includes('财神') || cName.includes('乐当家')) && !cName.includes('白金')) {
+          score += 45;
+        } else if (cName.includes('白金')) {
+          score -= 15;
+        }
+      }
+      // Standard / Young / Normal (普卡 / 标准 / 青年)
+      else if (targetTier.includes('普卡') || targetTier.includes('标准') || targetTier.includes('young') || targetTier.includes('青年')) {
+        if (cName.includes('普卡') || cName.includes('标准') || cName.includes('young') || cName.includes('灵通') || cName.includes('经典') || cTier.includes('标准')) {
+          score += 40;
+        } else if (cName.includes('白金') || cName.includes('黑金')) {
+          score -= 20;
+        }
+      }
+    }
+
+    // Prefer official source slightly unless exact match
+    if (c.source === 'cardentify') {
+      score += 2;
+    }
+    if (score > maxScore) {
+      maxScore = score;
+      best = c;
+    }
+  }
+
+  return best;
+}
+
+// Backwards-compatible best match returning CardFacePreset
+export function matchBestCardentifyPreset(
+  name: string,
+  bankName?: string,
+  category?: string,
+  cardTier?: string
+): CardFacePreset {
+  const card = matchBestCardentifyCard(name, bankName, category, cardTier);
+  if (card) {
+    return cardentifyToPreset(card);
+  }
+  return CARDENTIFY_PRESETS[0];
+}
+
+// Countries metadata for Filter Tabs
+export const COUNTRY_NAMES: Record<string, string> = {
+  CN: '中国大陆',
+  HK: '中国香港',
+  TW: '中国台湾',
+  US: '美国',
+  JP: '日本',
+  AU: '澳大利亚',
+  GB: '英国',
+  CA: '加拿大',
+  SG: '新加坡',
+  MO: '中国澳门',
+  DE: '德国',
+  RU: '俄罗斯',
+  EE: '爱沙尼亚',
+  IE: '爱尔兰',
+  KZ: '哈萨克斯坦',
+  MY: '马来西亚',
+  PR: '波多黎各',
+  GR: '希腊',
+};

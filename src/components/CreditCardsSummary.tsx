@@ -1,0 +1,141 @@
+import React from 'react';
+import {
+  CreditCard,
+  Calendar,
+  Clock,
+  Plus,
+  ReceiptText,
+} from 'lucide-react';
+import { FinancialAccount, FinancialSummary } from '../types';
+import { formatCurrency } from '../lib/formatters';
+import { AccountCardFace } from './AccountCardFace';
+
+interface CreditCardsSummaryProps {
+  accounts: FinancialAccount[];
+  summary: FinancialSummary;
+  privacyMode: boolean;
+  onOpenRepayment: (targetAccountId?: string, suggestedAmount?: number) => void;
+  onAddAccount: (category: 'CREDIT_CARD' | 'JD_BAITIAO' | 'HUABEI') => void;
+  onEditAccount: (account: FinancialAccount) => void;
+  onOpenNewTx?: (defaultType?: string, accountId?: string) => void;
+  onQuickReconcile?: (account: FinancialAccount) => void;
+  onOpenCardentifyGallery?: (account: FinancialAccount) => void;
+}
+
+export const CreditCardsSummary: React.FC<CreditCardsSummaryProps> = ({
+  accounts,
+  summary,
+  privacyMode,
+  onOpenRepayment,
+  onAddAccount,
+  onEditAccount,
+  onOpenNewTx,
+  onQuickReconcile,
+  onOpenCardentifyGallery,
+}) => {
+  const creditAccounts = accounts.filter(
+    (acc) => acc.category === 'CREDIT_CARD' || acc.category === 'JD_BAITIAO' || acc.category === 'HUABEI'
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Top Banner & Metric Summary */}
+      <div className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-6 sm:p-8 shadow-sm relative">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 relative z-10">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 dark:bg-rose-950/60 border border-rose-200/70 dark:border-rose-900/60 text-rose-700 dark:text-rose-400 text-xs font-semibold">
+              <CreditCard className="w-3.5 h-3.5" />
+              <span>信用卡</span>
+            </div>
+            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/60">
+              共 {creditAccounts.length} 张信用卡/信贷账户
+            </span>
+          </div>
+
+          {/* Quick Repayment CTA */}
+          <div className="flex items-center gap-3">
+            <button
+              id="btn-credit-repay-all"
+              type="button"
+              onClick={() => onOpenRepayment()}
+              className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold px-4 py-2 rounded-xl shadow-xs active:scale-95 transition-all text-xs sm:text-sm"
+            >
+              <ReceiptText className="w-4 h-4" />
+              <span>一键快速还款</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 3 Metric Pillars */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6 pt-6 border-t border-slate-100 dark:border-slate-800">
+          <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60">
+            <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">总授信信用额度</span>
+            <div className="text-2xl font-bold font-mono text-slate-900 dark:text-white mt-1">
+              {formatCurrency(summary.totalCreditLimit, privacyMode)}
+            </div>
+            <div className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+              共绑定 {creditAccounts.length} 张信贷卡片
+            </div>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-rose-50/50 dark:bg-rose-950/30 border border-rose-100 dark:border-rose-900/40">
+            <span className="text-xs text-rose-700 dark:text-rose-400 font-medium">当前已用金额 (待还账单)</span>
+            <div className="text-2xl font-bold font-mono text-rose-600 dark:text-rose-400 mt-1">
+              {formatCurrency(summary.totalUsedCredit, privacyMode)}
+            </div>
+            <div className="text-xs text-rose-500 dark:text-rose-400/80 mt-1">
+              额度占用率: {summary.creditUtilizationRate.toFixed(1)}%
+            </div>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40">
+            <span className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">当前剩余可用总额度</span>
+            <div className="text-2xl font-bold font-mono text-emerald-700 dark:text-emerald-400 mt-1">
+              {formatCurrency(summary.totalAvailableCredit, privacyMode)}
+            </div>
+            <div className="text-xs text-emerald-600 dark:text-emerald-400/80 mt-1">
+              随时可刷卡或白条消费
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Credit Cards & JD Baitiao List */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6">
+        {creditAccounts.map((acc) => {
+          const used = acc.usedCredit !== undefined ? acc.usedCredit : acc.balance || 0;
+
+          return (
+            <div
+              key={acc.id}
+              className="transition-all duration-200 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-3.5 sm:p-4 shadow-xs hover:shadow-md flex flex-col justify-between"
+            >
+              {/* Card Header: Card Name + Last 4 */}
+              <div className="flex items-center justify-between gap-2 mb-2.5 px-0.5">
+                <h3
+                  className="font-bold text-sm sm:text-base text-slate-900 dark:text-white truncate"
+                  title={acc.name}
+                >
+                  {acc.name}
+                </h3>
+                <div className="text-[11px] font-mono font-semibold text-slate-400 dark:text-slate-500 shrink-0">
+                  •••• {acc.cardNumberLast4 || '8888'}
+                </div>
+              </div>
+
+              <AccountCardFace
+                account={acc}
+                privacyMode={privacyMode}
+                onEditAccount={onEditAccount}
+                onOpenRepayment={(accountId, amount) => onOpenRepayment(accountId, amount || used)}
+                onOpenNewTx={onOpenNewTx}
+                onQuickReconcile={onQuickReconcile}
+                onOpenCardentifyGallery={onOpenCardentifyGallery}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};

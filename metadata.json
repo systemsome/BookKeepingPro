@@ -1,0 +1,6 @@
+{
+  "name": "资产管家",
+  "description": "安全密码登录保护的个人与家庭全资产记账平台，支持专项账本项目（单项目支出、收入与净结余独立核算与预算管控）、账本明细平账冲红（退费退款不虚增收入，智能冲减历史支出）、收支日历、智能排序记账本与一键生成消费小票，支持借记卡、信用卡、理财、黄金理财、白条及借贷往来清晰规整。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  finance-manager:
+    # 直接拉取预构建镜像（替换为您的 github 用户名和小写仓库名，或您的 DockerHub 镜像）
+    image: ghcr.io/${DOCKER_IMAGE_NAME:-xiaoxiaomu86/finance-manager}:latest
+    container_name: finance-manager
+    restart: unless-stopped
+    ports:
+      # 主机端口:容器端口（如 NAS 的 3000 已被占用，可改为 8088:3000）
+      - "3000:3000"
+    volumes:
+      # 持久化数据存储目录（映射在 NAS 本地 ./data）
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATA_DIR=/app/data
+
